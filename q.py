@@ -7,7 +7,7 @@ from jaxlie import SO3
 import jax.numpy as jnp
 
 
-def _from_angle_axis(v, theta):
+def _from_axis_angle(v, theta):
     v = jnp.array(v)
     # Rotation of theta (radians) around axis v.
     vx, vy, vz = v
@@ -36,15 +36,24 @@ def _rotate(q, v):
 
 
 if __name__ == "__main__":
-    r = _from_angle_axis([0, 0, 1], jnp.pi / 2)
+    r = _from_axis_angle(
+        [0, 0, 1],
+        jnp.pi / 2,
+    )
     p = _from_vector([0, 1, 0])
     print(_rotate(r, p))
 
-    r = _from_angle_axis([1, 0, 0], jnp.pi / 2)
+    r = _from_axis_angle(
+        [1, 0, 0],
+        jnp.pi / 2,
+    )
     p = _from_vector([0, 1, 0])
     print(_rotate(r, p))
 
-    r = _from_angle_axis([0, 1, 0], jnp.pi / 2)
+    r = _from_axis_angle(
+        [0, 1, 0],  #
+        jnp.pi / 2,
+    )
     p = _from_vector([1, 0, 0])
     print(_rotate(r, p))
 

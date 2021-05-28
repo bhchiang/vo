@@ -11,9 +11,13 @@ from jaxlie import SO3
 from mpl_toolkits import mplot3d
 
 import calib
-from q import _from_angle_axis, _from_wxyz
+from q import _from_axis_angle, _from_wxyz, _rotate, _from_vector
 
+# Show plots
 show = False
+# Triangulate new features every `discover_freq` frames
+discover_features = True
+discover_freq = 10
 
 
 def _load_text(p):
@@ -32,7 +36,8 @@ poses = []
 for l in _load_text(poses_path):
     poses.append(jnp.array([float(x) for x in l.split(" ")]).reshape((3, 4)))
 poses = jnp.array(poses)
-print(f"poses.shape = {poses.shape}")
+print(f"{poses.shape = }")
+gt_positions = jnp.array([x[:, -1] for x in poses])
 
 data_path = Path("/media/bryan/shared/kitti2/dataset/sequences/00")
 calib_path = data_path / "calib.txt"
@@ -87,6 +92,7 @@ disparity = stereo.compute(left, right) / 16.0
 plt.figure()
 plt.title("initial disparity")
 plt.imshow(disparity)
+
 if show:
     plt.show()
 
@@ -110,9 +116,9 @@ if show:
 
 # Find point features
 corners = cv2.goodFeaturesToTrack(left,
-                                  maxCorners=200,
-                                  qualityLevel=0.01,
-                                  minDistance=10)
+                                  maxCorners=10,
+                                  qualityLevel=0.1,
+                                  minDistance=50)
 corners = onp.squeeze(corners).astype(int)
 
 disparity_corners = disparity[corners[:, 1], corners[:, 0]]
@@ -282,13 +288,13 @@ mu0 = _join(
     # Rotation (rotation quaternion, we start off as identity = no rotation)
     SO3.identity(),
     # Velocity (xyz),
-    [0, 0, 0.5],
+    [0, 0, 2],
     # Angular velocity (xyz, rad/s),
     1e-8 + jnp.array([0, 0, 0]),
     features)
 
 # Close to 0 process noise for the landmarks (assume stationary)
-Q = jax.scipy.linalg.block_diag(jnp.identity(13),
+Q = jax.scipy.linalg.block_diag(0.1 * jnp.identity(13),
                                 1e-8 * jnp.identity(3 * features.shape[0]))
 R = 1e-3 * jnp.identity(2 * len(features))
 sigma0 = 0.01 * jnp.identity(len(mu0))
@@ -309,8 +315,8 @@ def _f(x, dt):
     # Calculate axis-angle representation
     w_norm = jnp.linalg.norm(w)
     theta = dt * w_norm
-    _w = jnp.where(w_norm > 1e-4, w / w_norm, w)
-    r = _from_angle_axis(_w, theta)
+    _w = jnp.where(w_norm > 1e-8, w / w_norm, w)
+    r = _from_axis_angle(_w, theta)
 
     # Ensure rotation
     r = r.normalize()
@@ -338,7 +344,28 @@ def _normalize_q(x):
 
 
 # Observe
-img_h, img_w = (1241, 376)
+img_w, img_h = (1241, 376)
+
+
+def _plot_orientation(q):
+    fig = plt.figure()
+    ax = plt.axes(projection='3d')
+
+    # Basis vectors
+    xb = _rotate(q, _from_vector([1, 0, 0]))
+    yb = _rotate(q, _from_vector([0, 1, 0]))
+    zb = _rotate(q, _from_vector([0, 0, 1]))
+
+    bs = [xb, yb, zb]
+    bs = [_.wxyz[1:] for _ in bs]
+
+    for x in bs:
+        ax.plot([0, x[0]], [0, x[1]], [0, x[2]])
+
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_zlabel('z')
+    plt.show()
 
 
 def _g(x):
@@ -358,7 +385,6 @@ def _g(x):
         # return xyz - p
         return R_ @ (xyz - p)
 
-    embed()
     features = jax.vmap(l)(features)
     # embed()
 
@@ -367,16 +393,16 @@ def _g(x):
     projected_features = P0 @ features.T
     projected_features = (projected_features / projected_features[-1]).T
     # Clip features to correct range
-    # final = jnp.array([
-    #     jnp.clip(projected_features[:, 0], a_min=0, a_max=img_w),
-    #     jnp.clip(projected_features[:, 1], a_min=0, a_max=img_h)
-    # ]).T
-    final = projected_features[:, :2]
+    final = jnp.array([
+        jnp.clip(projected_features[:, 0], a_min=0, a_max=img_w),
+        jnp.clip(projected_features[:, 1], a_min=0, a_max=img_h)
+    ]).T
+    # final = projected_features[:, :2]
     return final.flatten()
 
 
 def _range(x):
-    print(jnp.min(x), jnp.max(x))
+    (jnp.min(x), jnp.max(x))
 
 
 # Set up optical flow tracking
@@ -394,12 +420,58 @@ _C = jax.jit(jax.jacfwd(_g))
 # n = state dimension
 n = len(mu0)
 
-_O = []
-observable = []
+measure_errors = []
+
+
+def _predict():
+    pass
+
+
+def _update():
+    pass
+
+
+def _update_mu(_mu, K, inno):
+    add_term = K @ inno
+    return _mu + add_term
+
+    # Modified quaternion update
+    mu = _mu + add_term
+
+    # Don't add quaternions, rotate existing orientation by new quaternion
+    q = SO3(_mu[3:7])
+    new_q = q @ SO3.exp(add_term[3:6]).normalize()
+    # embed()
+    mu = mu.at[3:7].set(new_q.wxyz)
+    return mu
+
+
+def _view_to_world(x, features):
+    """
+    Convert 3D feature locations (M, 3) in view space to world space 
+    given the camera location and position.
+    """
+    p, q, v, w, _ = _split(x)
+    R = q.as_matrix()
+    print(f"{R = }")
+    print(f"{p = }")
+
+    def l(xyz):
+        return R @ xyz + p
+
+    features = jax.vmap(l)(features)
+    return features
+
+
+def _update_features(x, new_features):
+    p, q, v, w, _ = _split(x)
+    new_features = jnp.reshape(new_features, (-1, 3))
+    return _join(p, q, v, w, new_features)
+
 
 try:
     # Iterate through all images (measurements)
-    for i in range(1, 100):
+    for i in range(1, 30):
         mu = mus[-1]
         sigma = sigmas[-1]
         dt = times[i] - times[i - 1]
@@ -435,7 +507,7 @@ try:
         good_new = p1[st == 1]
         good_old = p0[st == 1]
         print(f"{jnp.max(good_new) = }, {jnp.min(good_new) = }")
-    
+
         if show:
             fig, axs = plt.subplots(nrows=1, ncols=2)
             axs[0].imshow(old_left)
@@ -448,10 +520,35 @@ try:
             plt.show()
 
         p1 = p1.flatten()
+        st = st.flatten()
+        good = jnp.argwhere(st == 1).flatten()
+        missed = jnp.argwhere(st == 0).flatten()
+
         _y = _g(_mu)
+
+        # Visualize measured vs observed
+        y = _y.reshape((-1, 2))
+        if show:
+            plt.figure()
+            plt.imshow(left)
+            plt.scatter(y[:, 0][good], y[:, 1][good], c='c', label="projected")
+            plt.scatter(good_new[:, 0],
+                        good_new[:, 1],
+                        c='r',
+                        label="measured")
+            plt.legend()
+            plt.show()
+
         # embed()
         print(f"{jnp.max(_y) = }, {jnp.min(_y) = }")
         C = _C(_mu)
+
+        # Zero out missing observations
+        for ix in missed:
+            j = 2 * ix
+            C = C.at[j:j + 2].set(0)
+
+        # embed()
 
         # Observability
         # O = []
@@ -465,9 +562,8 @@ try:
         # _O.append(observable)
 
         K = _sigma @ C.T @ jnp.linalg.inv(C @ _sigma @ C.T + R)
-
-        st = st.flatten()
-        missed = jnp.argwhere(st == 0).flatten()
+        if i > 10:
+            embed()
 
         inno = p1 - _y
         inno = inno.reshape((-1, 2)).at[missed].set(0)
@@ -482,24 +578,96 @@ try:
             z_sigma = z_sigma.at[j:j + 3].set(0)
             z_sigma = z_sigma.at[:, j:j + 3].set(0)
 
-        mu = _mu + K @ inno
+        mu = _update_mu(_mu, K, inno)
         sigma = _sigma - K @ C @ z_sigma
 
-        # Check observability
-        observable.append(jnp.linalg.norm(_g(mu) - p1))
+        # Check measurement error
+        measure_errors.append(jnp.linalg.norm(_g(mu) - p1))
 
-        # Post-update processing (MonoSLAM)
+        # Post-update processing
         # Normalize quaternion and set covariance accordingly
-        embed()
+        # if i == 8:
+        #     embed()
         mu, jq = _normalize_q(mu)
         sigma = sigma.at[3:7, 3:7].set(jq)
-
-        mus.append(mu)
-        sigmas.append(sigma)
 
         # Update feature tracking
         old_left = left
         p0 = p1.reshape((-1, 1, 2))
+
+        if i % discover_freq == 0 and discover_features:
+            # Do the dumb thing - triangulate new 3D features with stereo
+            # Get world space positions based on current camera position + rotation
+            # Replace all features with the new ones - retain constant amount of features
+
+            # NOTE: number of features found may be <= maxCorners, no guarantee
+            corners = cv2.goodFeaturesToTrack(left,
+                                              maxCorners=10,
+                                              qualityLevel=0.1,
+                                              minDistance=50)
+            corners = onp.squeeze(corners).astype(int)
+            disparity = stereo.compute(left, right) / 16.0
+            disparity_corners = disparity[corners[:, 1], corners[:, 0]]
+
+            # Filter out certain points
+            valid = disparity_corners > 10
+            disparity_corners = disparity_corners[valid]
+            corners = corners[valid]
+
+            if show:
+                fig, axs = plt.subplots(nrows=2, ncols=2)
+                axs[0, 0].imshow(left)
+                axs[0, 0].set_title(f"frame {i}, corners on left")
+                axs[0, 0].scatter(corners[:, 0], corners[:, 1], c='r')
+
+                axs[0, 1].imshow(right)
+                axs[0, 1].set_title(f"frame {i}, corners on right")
+                axs[0, 1].scatter(corners[:, 0],
+                                  corners[:, 1],
+                                  c='c',
+                                  label="original")
+                axs[0, 1].scatter(corners[:, 0] - disparity_corners,
+                                  corners[:, 1],
+                                  c='r',
+                                  label="adjusted")
+
+                axs[1, 0].imshow(disparity)
+                axs[1, 0].set_title("disparity")
+
+            # Backproject to 3D
+            z = (fx_px * baseline_m) / disparity_corners
+            bp_x = (corners[:, 0] - cx) * (z / fx_px)
+            bp_y = (corners[:, 1] - cy) * (z / fy_px)
+            bp_z = z
+
+            features = onp.vstack((bp_x, bp_y, bp_z)).T
+
+            # Convert from view space to world space
+            features_world = _view_to_world(mu, features)
+            old_mu = mu
+            mu = _update_features(mu, features_world)
+            _projected = _g(mu)
+            _projected = jnp.reshape(_projected, (-1, 2))
+
+            # Check that the new features project down to our original corners
+            onp.testing.assert_allclose(corners, round(_projected))
+
+            # Assign as previous features for optical flow
+            p0 = corners
+
+            # Update shapes for KF
+            num_features = len(features)  # Number of new features
+            Q = jax.scipy.linalg.block_diag(
+                0.1 * jnp.identity(13), 1e-8 * jnp.identity(3 * num_features))
+            R = 1e-3 * jnp.identity(2 * num_features)
+            sigma = jax.scipy.linalg.block_diag(
+                sigma[:13, :13],  #
+                0.1 * jnp.identity(3 * num_features))
+
+            embed()
+
+        mus.append(mu)
+        sigmas.append(sigma)
 
     mus = jnp.array(mus)
 except Exception as e:
