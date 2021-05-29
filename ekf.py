@@ -471,7 +471,7 @@ def _update_features(x, new_features):
 
 try:
     # Iterate through all images (measurements)
-    for i in range(1, 30):
+    for i in range(1, 200):
         mu = mus[-1]
         sigma = sigmas[-1]
         dt = times[i] - times[i - 1]
@@ -562,8 +562,8 @@ try:
         # _O.append(observable)
 
         K = _sigma @ C.T @ jnp.linalg.inv(C @ _sigma @ C.T + R)
-        if i > 10:
-            embed()
+        # if i > 10:
+        #     embed()
 
         inno = p1 - _y
         inno = inno.reshape((-1, 2)).at[missed].set(0)
@@ -603,7 +603,7 @@ try:
             # NOTE: number of features found may be <= maxCorners, no guarantee
             corners = cv2.goodFeaturesToTrack(left,
                                               maxCorners=10,
-                                              qualityLevel=0.1,
+                                              qualityLevel=0.5,
                                               minDistance=50)
             corners = onp.squeeze(corners).astype(int)
             disparity = stereo.compute(left, right) / 16.0
@@ -664,7 +664,7 @@ try:
                 sigma[:13, :13],  #
                 0.1 * jnp.identity(3 * num_features))
 
-            embed()
+            # embed()
 
         mus.append(mu)
         sigmas.append(sigma)
