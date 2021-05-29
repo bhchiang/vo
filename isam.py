@@ -20,9 +20,7 @@ import calib
 
 # Show plots
 show = False
-# Triangulate new features every `discover_freq` frames
-discover_features = True
-discover_freq = 10
+
 from gtsam.utils import plot
 
 
@@ -268,12 +266,17 @@ def _lsym(idx):
     return symbol(ord('l'), idx)
 
 
+# Start the loop - add more factors for future poses
+first_idx = 0
+start_idx = first_idx + 1
+num_frames = 30
+
 ## Create graph container and add factors to it
 graph = gtsam.NonlinearFactorGraph()
 
 ## add a constraint on the starting pose
 first_pose = gtsam.Pose3()
-graph.add(gtsam.NonlinearEqualityPose3(_xsym(0), first_pose))
+graph.add(gtsam.NonlinearEqualityPose3(_xsym(first_idx), first_pose))
 
 ## Create realistic calibration and measurement noise model
 # format: fx fy skew cx cy baseline
@@ -282,7 +285,7 @@ stereo_model = gtsam.noiseModel_Diagonal.Sigmas(onp.array([1.0, 1.0, 1.0]))
 
 ## Create initial estimate for camera poses and landmarks
 initialEstimate = gtsam.Values()
-initialEstimate.insert(_xsym(0), first_pose)
+initialEstimate.insert(_xsym(first_idx), first_pose)
 
 isam = gtsam.ISAM2()
 
@@ -292,14 +295,11 @@ for i in range(num_features):
     d = disparity_corners[i]
     uR = uL - d
     graph.add(
-        gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR, v),
-                                    stereo_model, _xsym(0), _lsym(i), K))
+        gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR,
+                                                       v), stereo_model,
+                                    _xsym(first_idx), _lsym(i), K))
     initialEstimate.insert(_lsym(i), gtsam.Point3(x, y, z))
 print("Created factors for initial pose")
-
-# Start the loop - add more factors for future poses
-start_idx = 1
-num_frames = 15
 
 # Set up optical flow
 old_left = left
@@ -316,54 +316,38 @@ lk_params = dict(
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
 )
 img_w, img_h = (1241, 376)
-"""
-Estimate the next camera pose.
-Simple constant velocity motion model.
-We assume same rotation as before, we're moving forward by 1 meter
-The z-axis represents the direction forward.
-"""
+new_feature_threshold = 30
 velocity = 2
-
-
-def _predict_next_pose(pose):
-    rot = pose.rotation()
-    new_pos = pose.transformFrom(gtsam.Point3(0, 0, velocity))
-    return gtsam.Pose3(rot, new_pos)
-
 
 isam.update(graph, initialEstimate)
 result = isam.calculateEstimate()
 
 embed()
 
-
-def _plot_points(left, points, status):
-    plt.figure()
-    good = points[status == 1]
-    bad = points[status == 0]
-    plt.imshow(left)
-    plt.scatter(good[:, 0], good[:, 1], c='m', label="tracked")
-    plt.scatter(bad[:, 0], bad[:, 1], c='w', label="bad")
-    plt.legend()
-    plt.show()
+# Utility functions
 
 
-def _get_pose(result, idx):
-    return result.atPose3(_xsym(idx))
-
-
-new_feature_threshold = 30
-
-
-def _find_new_features(left,
-                       points,
-                       status,
-                       disparity,
-                       show=False,
-                       title="new points"):
+def _predict_next_pose(pose):
     """
-    left: image to find new features in.
-    points: existing points in the features.
+    Estimate the next camera pose.
+    Simple constant velocity motion model.
+    We assume same rotation as before, we're moving forward by 1 meter
+    The z-axis represents the direction forward.
+    """
+    rot = pose.rotation()
+    new_pos = pose.transformFrom(gtsam.Point3(0, 0, velocity))
+    return gtsam.Pose3(rot, new_pos)
+
+
+def _find_new_points(left,
+                     points,
+                     status,
+                     disparity,
+                     show=False,
+                     title="new points"):
+    """
+    left: image to find new points in.
+    points: existing points in the points.
     disparity: disparity of current stereo pair.
     """
     corners = cv2.goodFeaturesToTrack(left,
@@ -407,6 +391,23 @@ def _find_new_features(left,
         plt.title(title)
         plt.legend()
         plt.show()
+
+    return new_points
+
+
+def _plot_points(left, points, status):
+    plt.figure()
+    good = points[status == 1]
+    bad = points[status == 0]
+    plt.imshow(left)
+    plt.scatter(good[:, 0], good[:, 1], c='m', label="tracked")
+    plt.scatter(bad[:, 0], bad[:, 1], c='w', label="bad")
+    plt.legend()
+    plt.show()
+
+
+def _get_pose(result, idx):
+    return result.atPose3(_xsym(idx))
 
 
 for i in range(start_idx, start_idx + num_frames):
@@ -470,10 +471,7 @@ for i in range(start_idx, start_idx + num_frames):
         uL = onp.clip(uL, 0, img_w - 1)
         v = onp.clip(v, 0, img_h - 1)
 
-        # Disparity is valid
         d = disparity[v, uL]
-        if d < 10:
-            continue
 
         uR = uL - d
         uR = onp.clip(uR, 0, img_w - 1)
@@ -485,16 +483,48 @@ for i in range(start_idx, start_idx + num_frames):
     isam.update(graph, initialEstimate)
     result = isam.calculateEstimate()
 
-    # Get new features
-    cur_pose_smoothed = _get_pose(result, i)
-    new_features = _find_new_features(left,
-                                      points,
-                                      status,
-                                      disparity,
-                                      show=True,
-                                      title=f"new points for frame {i}")
+    # ==== Add new features ====
+    # graph = gtsam.NonlinearFactorGraph()
+    # initialEstimate = gtsam.Values()
 
-    embed()
+    # cur_pose_smoothed = _get_pose(result, i)
+    # new_points = _find_new_points(left,
+    #                               points,
+    #                               status,
+    #                               disparity,
+    #                               show=False,
+    #                               title=f"new points for frame {i}")
+    # embed()
+    # new_points = new_points[:5]
+
+    # num_new_points = len(new_points)
+    # for j in range(num_new_points):
+    #     landmark_symbol = _lsym(len(points) + j)
+    #     uL, v = new_points[j]
+    #     d = disparity[v, uL]
+    #     uR = uL - d
+
+    #     # Careful with indexing of new points!
+    #     graph.add(
+    #         gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR,
+    #                                                        v), stereo_model,
+    #                                     _xsym(i), landmark_symbol, K))
+
+    #     # Retrieve depth from disparity
+    #     z = (fx_px * baseline_m) / d
+
+    #     # Backproject
+    #     x = (uL - cx) * (z / fx_px)
+    #     y = (uR - cy) * (z / fy_px)
+
+    #     initialEstimate.insert(landmark_symbol, gtsam.Point3(x, y, z))
+
+    # # Extend points
+    # points = onp.vstack((points, new_points))
+    # status = onp.hstack((status, onp.ones(num_new_points)))
+
+    # isam.update(graph, initialEstimate)
+    # embed()
 
 embed()
 plot.plot_3d_points(1, result)
