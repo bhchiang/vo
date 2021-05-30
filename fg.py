@@ -382,3 +382,23 @@ plot.plot_3d_points(1, result)
 plot.plot_trajectory(1, result)
 plot.set_axes_equal(1)
 plot.show()
+
+positions = []
+for i in range(0, start_idx + num_frames):
+    pose = result.atPose3(_xsym(i))
+    pos = pose.translation()
+    positions.append([pos.x(), pos.y(), pos.z()])
+
+positions = onp.array(positions)
+
+plt.figure()
+plt.plot(positions[:, 0], positions[:, 2], label="estimated")
+plt.plot(gt_positions[:start_idx + num_frames, 0],
+         gt_positions[:start_idx + num_frames, 2],
+         label="ground truth")
+plt.xlabel("x")
+plt.ylabel("z")
+plt.title("batch optimization")
+plt.gca().set_aspect('equal')
+plt.legend()
+plt.show()
