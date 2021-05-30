@@ -19,9 +19,7 @@ import calib
 
 # Show plots
 show = False
-# Triangulate new features every `discover_freq` frames
-discover_features = True
-discover_freq = 10
+
 from gtsam.utils import plot
 
 
@@ -121,9 +119,9 @@ if show:
 
 # Find point features
 corners = cv2.goodFeaturesToTrack(left,
-                                  maxCorners=500,
+                                  maxCorners=200,
                                   qualityLevel=0.3,
-                                  minDistance=50)
+                                  minDistance=30)
 corners = onp.squeeze(corners).astype(int)
 
 disparity_corners = disparity[corners[:, 1], corners[:, 0]]
@@ -267,12 +265,23 @@ def _lsym(idx):
     return symbol(ord('l'), idx)
 
 
+def _plot_poses(positions):
+    plt.figure()
+    plt.plot(positions[:, 0], positions[:, 2])
+    plt.show()
+
+
+# Start the loop - add more factors for future poses
+first_idx = 80
+start_idx = 1 + first_idx
+num_frames = 20
+
 ## Create graph container and add factors to it
 graph = gtsam.NonlinearFactorGraph()
 
 ## add a constraint on the starting pose
 first_pose = gtsam.Pose3()
-graph.add(gtsam.NonlinearEqualityPose3(_xsym(0), first_pose))
+graph.add(gtsam.NonlinearEqualityPose3(_xsym(first_idx), first_pose))
 
 ## Create realistic calibration and measurement noise model
 # format: fx fy skew cx cy baseline
@@ -281,7 +290,7 @@ stereo_model = gtsam.noiseModel_Diagonal.Sigmas(onp.array([1.0, 1.0, 1.0]))
 
 ## Create initial estimate for camera poses and landmarks
 initialEstimate = gtsam.Values()
-initialEstimate.insert(_xsym(0), first_pose)
+initialEstimate.insert(_xsym(first_idx), first_pose)
 
 for i in range(num_features):
     uL, v = corners[i]
@@ -289,15 +298,12 @@ for i in range(num_features):
     d = disparity_corners[i]
     uR = uL - d
     graph.add(
-        gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR, v),
-                                    stereo_model, _xsym(0), _lsym(i), K))
+        gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR,
+                                                       v), stereo_model,
+                                    _xsym(first_idx), _lsym(i), K))
     initialEstimate.insert(_lsym(i), gtsam.Point3(x, y, z))
 print("Created factors for initial pose")
 embed()
-
-# Start the loop - add more factors for future poses
-start_idx = 1
-num_frames = 20
 
 # Set up optical flow
 old_left = left
@@ -358,7 +364,7 @@ for i in range(start_idx, start_idx + num_frames):
 
     # Estimate the current camera pose
     initialEstimate.insert(
-        _xsym(i), gtsam.Pose3(gtsam.Rot3(), gtsam.Point3(-0.1, -0.1, 1.5 * i)))
+        _xsym(i), gtsam.Pose3(gtsam.Rot3(), gtsam.Point3(-0.1, -0.1, 2)))
 
     # Add factor connecting current pose to previous pose
     # graph.add(
@@ -382,3 +388,10 @@ plot.plot_3d_points(1, result)
 plot.plot_trajectory(1, result)
 plot.set_axes_equal(1)
 plot.show()
+
+ts = []
+for i in range(first_idx, first_idx + num_frames + 1):
+    pose = result.atPose3(_xsym(i))
+    t = pose.translation()
+    ts.append([t.x(), t.y(), t.z()])
+ts = onp.array(ts)
