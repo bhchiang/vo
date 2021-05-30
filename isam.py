@@ -269,7 +269,7 @@ def _lsym(idx):
 # Start the loop - add more factors for future poses
 first_idx = 0
 start_idx = first_idx + 1
-num_frames = 30
+num_frames = 15
 
 ## Create graph container and add factors to it
 graph = gtsam.NonlinearFactorGraph()
@@ -287,6 +287,8 @@ stereo_model = gtsam.noiseModel_Diagonal.Sigmas(onp.array([1.0, 1.0, 1.0]))
 initialEstimate = gtsam.Values()
 initialEstimate.insert(_xsym(first_idx), first_pose)
 
+# relinearizeInterval = 1
+# isam = gtsam.NonlinearISAM(relinearizeInterval)
 isam = gtsam.ISAM2()
 
 for i in range(num_features):
@@ -480,52 +482,64 @@ for i in range(start_idx, start_idx + num_frames):
                                         stereo_model, _xsym(i), _lsym(j), K))
 
     # Calculate best estimate
+    print(f"i = {i}")
+    if i == 12:
+        embed()
     isam.update(graph, initialEstimate)
     result = isam.calculateEstimate()
+    print("Done")
 
     # ==== Add new features ====
-    # graph = gtsam.NonlinearFactorGraph()
-    # initialEstimate = gtsam.Values()
+    continue
+    if i % 10 != 0:
+        continue
 
-    # cur_pose_smoothed = _get_pose(result, i)
-    # new_points = _find_new_points(left,
-    #                               points,
-    #                               status,
-    #                               disparity,
-    #                               show=False,
-    #                               title=f"new points for frame {i}")
+    graph = gtsam.NonlinearFactorGraph()
+    initialEstimate = gtsam.Values()
+
+    cur_pose_smoothed = _get_pose(result, i)
+    new_points = _find_new_points(left,
+                                  points,
+                                  status,
+                                  disparity,
+                                  show=False,
+                                  title=f"new points for frame {i}")
+    new_points = new_points[:5]
+
+    num_new_points = len(new_points)
+    for j in range(num_new_points):
+        landmark_symbol = _lsym(len(points) + j)
+        uL, v = new_points[j]
+        d = disparity[v, uL]
+        uR = uL - d
+
+        # Careful with indexing of new points!
+        graph.add(
+            gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR,
+                                                           v), stereo_model,
+                                        _xsym(i), landmark_symbol, K))
+
+        # Retrieve depth from disparity
+        z = (fx_px * baseline_m) / d
+
+        # Backproject
+        x = (uL - cx) * (z / fx_px)
+        y = (uR - cy) * (z / fy_px)
+
+        initialEstimate.insert(landmark_symbol, gtsam.Point3(x, y, z))
+
+    # Extend points
+    points = onp.vstack((points, new_points))
+    status = onp.hstack((status, onp.ones(num_new_points)))
+
+    # Adding 5 new landmarks - remove oldest 5 landmarks
+    print("Adding new points")
+    isam.update(graph, initialEstimate)
     # embed()
-    # new_points = new_points[:5]
 
-    # num_new_points = len(new_points)
-    # for j in range(num_new_points):
-    #     landmark_symbol = _lsym(len(points) + j)
-    #     uL, v = new_points[j]
-    #     d = disparity[v, uL]
-    #     uR = uL - d
-
-    #     # Careful with indexing of new points!
-    #     graph.add(
-    #         gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR,
-    #                                                        v), stereo_model,
-    #                                     _xsym(i), landmark_symbol, K))
-
-    #     # Retrieve depth from disparity
-    #     z = (fx_px * baseline_m) / d
-
-    #     # Backproject
-    #     x = (uL - cx) * (z / fx_px)
-    #     y = (uR - cy) * (z / fy_px)
-
-    #     initialEstimate.insert(landmark_symbol, gtsam.Point3(x, y, z))
-
-    # # Extend points
-    # points = onp.vstack((points, new_points))
-    # status = onp.hstack((status, onp.ones(num_new_points)))
-
-    # isam.update(graph, initialEstimate)
-    # embed()
-
+factor_indices = gtsam.FactorIndices()
+factor_indices.push_back(0)
+isam.update(gtsam.NonlinearFactorGraph(), gtsam.Values(), factor_indices)
 embed()
 plot.plot_3d_points(1, result)
 plot.plot_trajectory(1, result)
