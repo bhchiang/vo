@@ -113,8 +113,9 @@ def L(idx):
 
 
 # Optimization
-start_idx = 0
-num_frames = 20
+
+first_idx = 0
+num_frames = 200
 new_feature_threshold = 50
 
 
@@ -175,8 +176,12 @@ def _find_new_points(left,
 
 
 cur_pose = gtsam.Pose3()
+all_poses = gtsam.Values()
 
-for i in range(start_idx, start_idx + num_frames):
+all_poses.insert(X(first_idx), cur_pose)
+
+for i in range(first_idx, first_idx + num_frames):
+    print(f"optimizing transformation from {i} to {i+1}")
     ## Create graph container and add factors to it
     graph = gtsam.NonlinearFactorGraph()
 
@@ -213,35 +218,63 @@ for i in range(start_idx, start_idx + num_frames):
     next_left = _load_image(next_left_path)
     next_right = _load_image(next_right_path)
 
-    points = cv2.goodFeaturesToTrack(left,
-                                     maxCorners=500,
-                                     qualityLevel=0.3,
-                                     minDistance=50)
-    points = onp.int32(points).reshape((-1, 2))
-    num_points = len(points)
+    # Initiate SIFT detector
+    sift = cv2.SIFT_create()
+    # find the keypoints and descriptors with SIFT
+    kp1, des1 = sift.detectAndCompute(left, None)
+    kp2, des2 = sift.detectAndCompute(next_left, None)
 
-    # Track optical flow into next frame
-    p0 = onp.float32(points).reshape((-1, 1, 2))
-    p1, st, err = cv2.calcOpticalFlowPyrLK(
-        old_left,  #
-        left,
-        p0,
-        None,
-        **lk_params)
-    st = st.flatten()
-    p1 = p1.reshape((-1, 2))
-    good_points = points[st == 1]
-    next_good_points = p1[st == 1]
+    FLANN_INDEX_KDTREE = 1
+    index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+    search_params = dict(checks=50)
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
+    matches = flann.knnMatch(des1, des2, k=2)
+    # store all the good matches as per Lowe's ratio test.
+    good = []
+    for m, n in matches:
+        if m.distance < 0.7 * n.distance:
+            good.append(m)
+    if len(good) > 10:
+        src_pts = onp.float32([kp1[m.queryIdx].pt
+                               for m in good]).reshape(-1, 2)
+        dst_pts = onp.float32([kp2[m.trainIdx].pt
+                               for m in good]).reshape(-1, 2)
+        # embed()
+        M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        matchesMask = mask.ravel().tolist()
+        # h, w = left.shape
+        # pts = onp.float32([[0, 0], [0, h - 1], [w - 1, h - 1],
+        #                    [w - 1, 0]]).reshape(-1, 1, 2)
+        # dst = cv2.perspectiveTransform(pts, M)
+        # next_left = cv2.polylines(next_left, [onp.int32(dst)], True, 255, 3,
+        #                           cv2.LINE_AA)
+    else:
+        print("Not enough matches are found - {}/{}".format(len(good), 10))
+        matchesMask = None
 
-    num_good_points = len(good_points)
+    if show:
+        draw_params = dict(
+            matchColor=(0, 255, 0),  # draw matches in green color
+            singlePointColor=None,
+            matchesMask=matchesMask,  # draw only inliers
+            flags=2)
+        img3 = cv2.drawMatches(left, kp1, next_left, kp2, good, None,
+                               **draw_params)
+        plt.imshow(img3, 'gray')
+        plt.show()
 
     disparity = stereo.compute(left, right) / 16.0
     next_disparity = stereo.compute(next_left, next_right) / 16.0
 
-    for j in range(num_good_points):
-        print(f"frame = {i}, point = {j}")
+    mask = mask.flatten()
+
+    good_src_pts = src_pts[mask == 1].reshape((-1, 2)).astype(onp.int32)
+    good_dst_pts = dst_pts[mask == 1].reshape((-1, 2)).astype(onp.int32)
+
+    for j in range(len(good_src_pts))[:300]:
+        # print(f"frame = {i}, point = {j}")
         # Current frame
-        uL, v = good_points[j]
+        uL, v = good_src_pts[j]
         d = disparity[v, uL]
         uR = uL - d
 
@@ -250,13 +283,9 @@ for i in range(start_idx, start_idx + num_frames):
         y = (uR - cy) * (z / fy_px)
 
         # Next frame
-        next_uL, next_v = next_good_points[j]
+        next_uL, next_v = good_dst_pts[j]
         next_d = next_disparity[next_v, next_uL]
         next_uR = next_uL - next_d
-
-        next_z = (fx_px * baseline_m) / next_d
-        next_x = (next_uL - cx) * (next_z / fx_px)
-        next_y = (next_uR - cy) * (next_z / fy_px)
 
         if show:
             fig, axs = plt.subplots(nrows=1, ncols=2)
@@ -278,71 +307,41 @@ for i in range(start_idx, start_idx + num_frames):
 
         graph.add(
             gtsam.GenericStereoFactor3D(
-                gtsam.StereoPoint2(next_uL, next_uR, v), stereo_model, X(i),
-                L(j), K))
-        initialEstimate.insert(L(j), )
-
-    embed()
-
-    # Track features
-    p0 = onp.float32(p0).reshape((-1, 1, 2))
-    p1, st, err = cv2.calcOpticalFlowPyrLK(
-        old_left,  #
-        left,
-        p0,
-        None,
-        **lk_params)
-
-    st = st.flatten()
-    p1 = onp.int32(p1.reshape((-1, 2)))
-    disparity = stereo.compute(left, right) / 16.0
-
-    print(f"Number good features = {len(p1[st==1])}")
-
-    for j in range(num_features):
-        # Only add factors for good features
-        if st[j] == 0:
-            continue
-
-        # In bounds
-        uL, v = p1[j]
-        uL = onp.clip(uL, 0, img_w - 1)
-        v = onp.clip(v, 0, img_h - 1)
-
-        # Disparity is valid
-        d = disparity[v, uL]
-        if d < 10:
-            continue
-
-        uR = uL - d
-        uR = onp.clip(uR, 0, img_w - 1)
-        graph.add(
-            gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR, v),
-                                        stereo_model, _xsym(i), _lsym(j), K))
-
-    # Estimate the current camera pose
-    initialEstimate.insert(
-        _xsym(i), gtsam.Pose3(gtsam.Rot3(), gtsam.Point3(-0.1, -0.1, 1.5 * i)))
-
-    # Add factor connecting current pose to previous pose
-    # graph.add(
-    #     gtsam.BetweenFactorPose3(_xsym(i - 1), _xsym(i), odometry,
-    #                              odometry_noise))
-
-    # Clean up optical flow
-    p0 = p1
-    old_left = left
+                gtsam.StereoPoint2(next_uL, next_uR, v), stereo_model,
+                X(i + 1), L(j), K))
 
     # print(graph)
     print("Optimizing...")
-
     optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initialEstimate)
     result = optimizer.optimize()
+    # embed()
 
-print(result)
+    # Update current_pose
+    cur_pose = cur_pose.compose(result.atPose3(X(i + 1)))
+    all_poses.insert(X(i + 1), cur_pose)
 
 embed()
 plot.plot_3d_points(1, result)
 plot.plot_trajectory(1, result)
 plot.set_axes_equal(1)
 plot.show()
+
+positions = []
+for i in range(first_idx, first_idx + num_frames):
+    pose = all_poses.atPose3(X(i))
+    pos = pose.translation()
+    positions.append([pos.x(), pos.y(), pos.z()])
+
+positions = onp.array(positions)
+
+plt.figure()
+plt.plot(positions[:, 0], positions[:, 2], label="estimated")
+plt.plot(gt_positions[first_idx:first_idx + num_frames, 0],
+         gt_positions[first_idx:first_idx + num_frames, 2],
+         label="ground truth")
+plt.xlabel("x")
+plt.ylabel("z")
+plt.title("batch optimization")
+plt.gca().set_aspect('equal')
+plt.legend()
+plt.show()

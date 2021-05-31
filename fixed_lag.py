@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import gtsam
 import jax
+from jax.interpreters.xla import prefetch
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as onp
@@ -81,12 +82,14 @@ window_size = 5
 min_disp = 0
 num_disp = 64
 
+# Copied from someone else
 stereo = cv2.StereoSGBM_create(minDisparity=min_disp,
                                numDisparities=num_disp,
-                               blockSize=16,
-                               P1=8 * 3 * window_size**2,
-                               P2=8 * 3 * window_size**2,
+                               blockSize=9,
+                               P1=8 * 9 * 9,
+                               P2=32 * 9 * 9,
                                disp12MaxDiff=1,
+                               preFilterCap=63,
                                uniquenessRatio=10,
                                speckleWindowSize=100,
                                speckleRange=32)
@@ -113,17 +116,16 @@ axs[1].imshow(right)
 axs[1].set_title("right")
 axs[1].scatter(x, y, c='c', label="original")
 axs[1].scatter(x - disparity[y, x], y, c='r', label="adjusted")
+
 plt.legend()
 if show:
     plt.show()
 
-# embed()
-
 # Find point features
 corners = cv2.goodFeaturesToTrack(left,
                                   maxCorners=500,
-                                  qualityLevel=0.3,
-                                  minDistance=50)
+                                  qualityLevel=0.5,
+                                  minDistance=150)
 corners = onp.squeeze(corners).astype(int)
 
 disparity_corners = disparity[corners[:, 1], corners[:, 0]]
@@ -235,6 +237,7 @@ features = onp.vstack((bp_x, bp_y, bp_z)).T
 num_features = len(features)
 projected_features = P0 @ onp.append(
     features, onp.ones((num_features, 1)), axis=1).T  # 3 x N
+
 # Normalize by homogenous coordinate
 projected_features = (projected_features / projected_features[-1]).T
 projected_features = round(projected_features[:, :2])
@@ -270,11 +273,15 @@ def L(idx):
 # Start the loop - add more factors for future poses
 first_idx = 0
 start_idx = first_idx + 1
-num_frames = 70
+num_frames = 150
 
 lag = 5
-# smoother = gtsam_unstable.IncrementalFixedLagSmoother(lag)
-smoother = gtsam_unstable.BatchFixedLagSmoother(lag)
+incremental = True
+
+if incremental:
+    smoother = gtsam_unstable.IncrementalFixedLagSmoother(lag)
+else:
+    smoother = gtsam_unstable.BatchFixedLagSmoother(lag)
 
 new_factors = gtsam.NonlinearFactorGraph()
 new_values = gtsam.Values()
@@ -308,14 +315,19 @@ for i in range(num_features):
                                     stereo_model, X(first_idx), L(i), K))
     new_values.insert(L(i), gtsam.Point3(x, y, z))
     # Timestamp - the time of the frame at which the landmark inserted
-    # new_timestamps.insert(_timestamp(L(i), 0.0))
+    if incremental:
+        new_timestamps.insert(_timestamp(L(i), 0.0))
 
 
 def _update_smoother(new_factors, new_values, new_timestamps):
     """
     Impure update.
     """
-    smoother.update(new_factors, new_values, new_timestamps)
+    try:
+        smoother.update(new_factors, new_values, new_timestamps)
+    except Exception as e:
+        embed()
+
     result = smoother.calculateEstimate()
     new_timestamps.clear()
     new_values.clear()
@@ -518,8 +530,8 @@ for i in range(start_idx, start_idx + num_frames):
         landmark_key = L(j)
         # embed()
         # Skip if the landmark has been marginalized out?
-        # if not result.exists(landmark_key):
-        # continue
+        if incremental and not result.exists(landmark_key):
+            continue
 
         # In bounds
         uL, v = points[j]
@@ -535,9 +547,12 @@ for i in range(start_idx, start_idx + num_frames):
             gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR,
                                                            v), stereo_model,
                                         current_key, landmark_key, K))
+        if incremental:
+            new_timestamps.insert(_timestamp(landmark_key, t))
         # These are existing landmarks - no need to insert initial estimate
 
     # Update smoother
+    embed()
     result = _update_smoother(new_factors, new_values, new_timestamps)
     print("Estimated pose", _get_pose(result, current_key))
 
@@ -557,6 +572,11 @@ for i in range(start_idx, start_idx + num_frames):
     num_new_points = len(new_points)
     for j in range(num_new_points):
         landmark_symbol = L(len(points) + j)
+
+        # Skip if the landmark has been marginalized out
+        if incremental and not result.exists(landmark_key):
+            continue
+
         uL, v = new_points[j]
         d = disparity[v, uL]
         uR = uL - d
@@ -578,6 +598,8 @@ for i in range(start_idx, start_idx + num_frames):
         landmark_view = gtsam.Point3(x, y, z)
         landmark_world = current_pose_smoothed.transformFrom(landmark_view)
         new_values.insert(landmark_symbol, landmark_world)
+        if incremental:
+            new_timestamps.insert(_timestamp(landmark_key, t))
 
     # Extend points
     points = onp.vstack((points, new_points))
@@ -602,7 +624,6 @@ for i in range(first_idx, start_idx + num_frames):
     pose = _get_pose(final_result, X(i))
     pos = pose.translation()
     positions.append([pos.x(), pos.y(), pos.z()])
-
 positions = onp.array(positions)
 
 plt.figure()

@@ -319,7 +319,7 @@ lk_params = dict(
 )
 img_w, img_h = (1241, 376)
 new_feature_threshold = 30
-velocity = 2
+velocity = 1.5
 
 isam.update(graph, initialEstimate)
 result = isam.calculateEstimate()
@@ -412,136 +412,155 @@ def _get_pose(result, idx):
     return result.atPose3(_xsym(idx))
 
 
-for i in range(start_idx, start_idx + num_frames):
-    # Update iSAM with new factors
-    graph = gtsam.NonlinearFactorGraph()
-    initialEstimate = gtsam.Values()
+try:
+    for i in range(start_idx, start_idx + num_frames):
+        # Update iSAM with new factors
+        graph = gtsam.NonlinearFactorGraph()
+        initialEstimate = gtsam.Values()
 
-    # Initial estimate for pose at current frame
-    prev_pose = _get_pose(result, i - 1)
-    cur_pose_estimate = _predict_next_pose(prev_pose)
-    initialEstimate.insert(_xsym(i), cur_pose_estimate)
+        # Initial estimate for pose at current frame
+        prev_pose = _get_pose(result, i - 1)
+        cur_pose_estimate = _predict_next_pose(prev_pose)
+        initialEstimate.insert(_xsym(i), cur_pose_estimate)
 
-    # Add stereo factors
-    left_path = left_img_paths[i]
-    right_path = right_img_paths[i]
+        # Add stereo factors
+        left_path = left_img_paths[i]
+        right_path = right_img_paths[i]
 
-    left = _load_image(left_path)
-    right = _load_image(right_path)
+        left = _load_image(left_path)
+        right = _load_image(right_path)
 
-    # Track features
-    # We only want to track old points that were successfully tracked in the previous frame.
-    inds_to_track = onp.argwhere(status == 1).flatten()
-    points_to_track = points[inds_to_track]
-    points_to_track = onp.float32(points_to_track).reshape((-1, 1, 2))
-    p1, st, err = cv2.calcOpticalFlowPyrLK(
-        old_left,  #
-        left,
-        points_to_track,
-        None,
-        **lk_params)
+        # Track features
+        # We only want to track old points that were successfully tracked in the previous frame.
+        inds_to_track = onp.argwhere(status == 1).flatten()
+        points_to_track = points[inds_to_track]
+        points_to_track = onp.float32(points_to_track).reshape((-1, 1, 2))
+        p1, st, err = cv2.calcOpticalFlowPyrLK(
+            old_left,  #
+            left,
+            points_to_track,
+            None,
+            **lk_params)
 
-    st = st.flatten()
-    p1 = onp.int32(p1.reshape((-1, 2)))
-    tracked_inds = inds_to_track[st == 1]
-    untracked_inds = inds_to_track[st == 0]
+        st = st.flatten()
+        p1 = onp.int32(p1.reshape((-1, 2)))
+        tracked_inds = inds_to_track[st == 1]
+        untracked_inds = inds_to_track[st == 0]
 
-    print(f"Number good features for frame = {len(tracked_inds)}")
-    print(f"Number of missed features for frame = {len(untracked_inds)}")
+        print(f"Number good features for frame = {len(tracked_inds)}")
+        print(f"Number of missed features for frame = {len(untracked_inds)}")
 
-    # Update status of points that we were unable to track
-    status[untracked_inds] = 0
-    tracked_points = p1[st == 1]
-    points[tracked_inds] = tracked_points
-    old_left = left  # Update old frame
+        # Update status of points that we were unable to track
+        status[untracked_inds] = 0
+        tracked_points = p1[st == 1]
+        points[tracked_inds] = tracked_points
+        old_left = left  # Update old frame
 
-    print(f"Total missed = {len(jnp.argwhere(status == 0))}")
+        print(f"Total missed = {len(jnp.argwhere(status == 0))}")
 
-    if show:
-        embed()
-        _plot_points(left, points, status)
+        if show:
+            embed()
+            _plot_points(left, points, status)
 
-    disparity = stereo.compute(left, right) / 16.0
+        disparity = stereo.compute(left, right) / 16.0
 
-    for j in range(len(points)):
-        # Only add factors for good features
-        if status[j] == 0:
+        for j in range(len(points)):
+            # Only add factors for good features
+            if status[j] == 0:
+                continue
+
+            # In bounds
+            uL, v = points[j]
+            uL = onp.clip(uL, 0, img_w - 1)
+            v = onp.clip(v, 0, img_h - 1)
+
+            d = disparity[v, uL]
+
+            uR = uL - d
+            uR = onp.clip(uR, 0, img_w - 1)
+            graph.add(
+                gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR, v),
+                                            stereo_model, _xsym(i), _lsym(j),
+                                            K))
+
+        # Calculate best estimate
+        isam.update(graph, initialEstimate)
+        result = isam.calculateEstimate()
+        print("Done")
+
+        # ==== Add new features ====
+        continue
+        if i % 10 != 0:
             continue
 
-        # In bounds
-        uL, v = points[j]
-        uL = onp.clip(uL, 0, img_w - 1)
-        v = onp.clip(v, 0, img_h - 1)
+        graph = gtsam.NonlinearFactorGraph()
+        initialEstimate = gtsam.Values()
 
-        d = disparity[v, uL]
+        cur_pose_smoothed = _get_pose(result, i)
+        new_points = _find_new_points(left,
+                                      points,
+                                      status,
+                                      disparity,
+                                      show=False,
+                                      title=f"new points for frame {i}")
+        new_points = new_points[:5]
 
-        uR = uL - d
-        uR = onp.clip(uR, 0, img_w - 1)
-        graph.add(
-            gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR, v),
-                                        stereo_model, _xsym(i), _lsym(j), K))
+        num_new_points = len(new_points)
+        for j in range(num_new_points):
+            landmark_symbol = _lsym(len(points) + j)
+            uL, v = new_points[j]
+            d = disparity[v, uL]
+            uR = uL - d
 
-    # Calculate best estimate
-    print(f"i = {i}")
-    if i == 12:
-        embed()
-    isam.update(graph, initialEstimate)
-    result = isam.calculateEstimate()
-    print("Done")
+            # Careful with indexing of new points!
+            graph.add(
+                gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR, v),
+                                            stereo_model, _xsym(i),
+                                            landmark_symbol, K))
 
-    # ==== Add new features ====
-    continue
-    if i % 10 != 0:
-        continue
+            # Retrieve depth from disparity
+            z = (fx_px * baseline_m) / d
 
-    graph = gtsam.NonlinearFactorGraph()
-    initialEstimate = gtsam.Values()
+            # Backproject
+            x = (uL - cx) * (z / fx_px)
+            y = (uR - cy) * (z / fy_px)
 
-    cur_pose_smoothed = _get_pose(result, i)
-    new_points = _find_new_points(left,
-                                  points,
-                                  status,
-                                  disparity,
-                                  show=False,
-                                  title=f"new points for frame {i}")
-    new_points = new_points[:5]
+            initialEstimate.insert(landmark_symbol, gtsam.Point3(x, y, z))
 
-    num_new_points = len(new_points)
-    for j in range(num_new_points):
-        landmark_symbol = _lsym(len(points) + j)
-        uL, v = new_points[j]
-        d = disparity[v, uL]
-        uR = uL - d
+        # Extend points
+        points = onp.vstack((points, new_points))
+        status = onp.hstack((status, onp.ones(num_new_points)))
 
-        # Careful with indexing of new points!
-        graph.add(
-            gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR,
-                                                           v), stereo_model,
-                                        _xsym(i), landmark_symbol, K))
+        # Adding 5 new landmarks - remove oldest 5 landmarks
+        print("Adding new points")
+        isam.update(graph, initialEstimate)
+        # embed()
+except:
+    embed()
 
-        # Retrieve depth from disparity
-        z = (fx_px * baseline_m) / d
-
-        # Backproject
-        x = (uL - cx) * (z / fx_px)
-        y = (uR - cy) * (z / fy_px)
-
-        initialEstimate.insert(landmark_symbol, gtsam.Point3(x, y, z))
-
-    # Extend points
-    points = onp.vstack((points, new_points))
-    status = onp.hstack((status, onp.ones(num_new_points)))
-
-    # Adding 5 new landmarks - remove oldest 5 landmarks
-    print("Adding new points")
-    isam.update(graph, initialEstimate)
-    # embed()
-
-factor_indices = gtsam.FactorIndices()
-factor_indices.push_back(0)
-isam.update(gtsam.NonlinearFactorGraph(), gtsam.Values(), factor_indices)
 embed()
 plot.plot_3d_points(1, result)
 plot.plot_trajectory(1, result)
 plot.set_axes_equal(1)
+plt.show()
+
+positions = []
+x = i
+for i in range(first_idx, x):
+    pose = result.atPose3(_xsym(i))
+    pos = pose.translation()
+    positions.append([pos.x(), pos.y(), pos.z()])
+
+positions = onp.array(positions)
+
+plt.figure()
+plt.plot(positions[:, 0], positions[:, 2], label="estimated")
+plt.plot(gt_positions[first_idx:start_idx + num_frames, 0],
+         gt_positions[first_idx:start_idx + num_frames, 2],
+         label="ground truth")
+plt.xlabel("x")
+plt.ylabel("z")
+plt.title("batch optimization")
+plt.gca().set_aspect('equal')
+plt.legend()
 plt.show()
