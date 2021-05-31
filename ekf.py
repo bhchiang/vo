@@ -14,7 +14,7 @@ import calib
 from q import _from_axis_angle, _from_wxyz, _rotate, _from_vector
 
 # Show plots
-show = False
+show = True
 # Triangulate new features every `discover_freq` frames
 discover_features = True
 discover_freq = 10

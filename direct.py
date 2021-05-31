@@ -345,3 +345,9 @@ plt.title("batch optimization")
 plt.gca().set_aspect('equal')
 plt.legend()
 plt.show()
+
+with open("direct_poses.txt", "w") as f:
+    for i in range(first_idx, first_idx + num_frames):
+        m = all_poses.atPose3(X(i)).matrix()
+        f.write(" ".join(map(str, m.flatten())))
+        f.write("\n")
