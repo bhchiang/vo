@@ -173,6 +173,7 @@ bp_z = z
 # Plot backprojection results (2D)
 fig, axs = plt.subplots(nrows=2, ncols=1)
 
+embed()
 im = axs[0].scatter(corners[:, 0], corners[:, 1], c=bp_z)
 axs[0].invert_yaxis()
 fig.colorbar(im, ax=axs[0])

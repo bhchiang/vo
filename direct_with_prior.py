@@ -115,7 +115,7 @@ def L(idx):
 # Optimization
 
 first_idx = 0
-num_frames = 10
+num_frames = 20
 new_feature_threshold = 50
 
 
@@ -179,6 +179,8 @@ cur_pose = gtsam.Pose3()
 all_poses = gtsam.Values()
 
 all_poses.insert(X(first_idx), cur_pose)
+prior_noise = gtsam.noiseModel_Isotropic.Sigma(6, 0.1)
+velocity = 2
 
 for i in range(first_idx, first_idx + num_frames):
     print(f"optimizing transformation from {i} to {i+1}")
@@ -186,8 +188,7 @@ for i in range(first_idx, first_idx + num_frames):
     graph = gtsam.NonlinearFactorGraph()
 
     ## add a constraint on the starting pose
-    first_pose = gtsam.Pose3()
-    graph.add(gtsam.NonlinearEqualityPose3(X(i), first_pose))
+    graph.push_back(gtsam.PriorFactorPose3(X(i), cur_pose, prior_noise))
 
     ## Create realistic calibration and measurement noise model
     # format: fx fy skew cx cy baseline
@@ -195,12 +196,13 @@ for i in range(first_idx, first_idx + num_frames):
 
     ## Create initial estimate for camera poses and landmarks
     initialEstimate = gtsam.Values()
-    initialEstimate.insert(X(i), first_pose)
+    initialEstimate.insert(X(i), cur_pose)
 
     # Add estimate for next pose
-    rot = first_pose.rotation()
-    pos = first_pose.translation()
-    next_pose = gtsam.Pose3(rot, gtsam.Point3(pos.x(), pos.y(), pos.z() + 1))
+    rot = cur_pose.rotation()
+    cur_pos = cur_pose.translation()
+    pos = gtsam.Point3(cur_pos.x(), cur_pos.y(), cur_pos.z() + velocity)
+    next_pose = gtsam.Pose3(rot, cur_pose.transformFrom(pos))
 
     # Move forward
     initialEstimate.insert(X(i + 1), next_pose)
@@ -300,10 +302,12 @@ for i in range(first_idx, first_idx + num_frames):
             plt.legend()
             plt.show()
 
+        pt = gtsam.Point3(x, y, z)
+        pt_world = cur_pose.transformFrom(pt)
         graph.add(
             gtsam.GenericStereoFactor3D(gtsam.StereoPoint2(uL, uR, v),
                                         stereo_model, X(i), L(j), K))
-        initialEstimate.insert(L(j), gtsam.Point3(x, y, z))
+        initialEstimate.insert(L(j), pt_world)
 
         graph.add(
             gtsam.GenericStereoFactor3D(
@@ -317,14 +321,14 @@ for i in range(first_idx, first_idx + num_frames):
     # embed()
 
     # Update current_pose
-    cur_pose = cur_pose.compose(result.atPose3(X(i + 1)))
+    cur_pose = result.atPose3(X(i + 1))
     all_poses.insert(X(i + 1), cur_pose)
 
 embed()
 plot.plot_3d_points(1, result)
 plot.plot_trajectory(1, result)
 plot.set_axes_equal(1)
-plot.show()
+plt.show()
 
 positions = []
 for i in range(first_idx, first_idx + num_frames):

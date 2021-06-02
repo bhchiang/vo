@@ -584,3 +584,9 @@ plt.title("batch fixed lag smoothing")
 plt.gca().set_aspect('equal')
 plt.legend()
 plt.show()
+
+with open("fg_odom_poses.txt", "w") as f:
+    for i in range(first_idx, first_idx + num_frames):
+        m = result.atPose3(X(i)).matrix()[:3]
+        f.write(" ".join(map(str, m.flatten())))
+        f.write("\n")   

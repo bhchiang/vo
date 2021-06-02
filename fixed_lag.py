@@ -206,7 +206,7 @@ ax.set_zlabel('z')
 ax.invert_xaxis()
 ax.invert_zaxis()
 ax.set_title("image x, y with depth")
-
+embed()
 # Set aspect ratio (space out the z-axis to see the depth more clearly)
 ax.set_box_aspect(
     (onp.ptp(corners[:, 0]), onp.ptp(corners[:, 1]), 5 * onp.ptp(bp_z)))
@@ -273,10 +273,10 @@ def L(idx):
 # Start the loop - add more factors for future poses
 first_idx = 0
 start_idx = first_idx + 1
-num_frames = 150
+num_frames = 200
 
-lag = 5
-incremental = True
+lag = 3
+incremental = False
 
 if incremental:
     smoother = gtsam_unstable.IncrementalFixedLagSmoother(lag)
@@ -552,7 +552,7 @@ for i in range(start_idx, start_idx + num_frames):
         # These are existing landmarks - no need to insert initial estimate
 
     # Update smoother
-    embed()
+    # embed()
     result = _update_smoother(new_factors, new_values, new_timestamps)
     print("Estimated pose", _get_pose(result, current_key))
 
@@ -637,3 +637,9 @@ plt.title("batch fixed lag smoothing")
 plt.gca().set_aspect('equal')
 plt.legend()
 plt.show()
+
+with open("fixed_lag_poses_2.txt", "w") as f:
+    for i in range(first_idx, first_idx + num_frames):
+        m = final_result.atPose3(X(i)).matrix()[:3]
+        f.write(" ".join(map(str, m.flatten())))
+        f.write("\n")
